@@ -1,0 +1,2 @@
+# VRD
+Verifiable Random Draw
