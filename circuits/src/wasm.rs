@@ -8,6 +8,8 @@ use halo2_proofs::{
 use js_sys::Uint8Array;
 use wasm_bindgen::prelude::*;
 
+const N: u64 = 30;
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
@@ -34,16 +36,7 @@ pub fn setup_params(k: u32) -> Uint8Array {
 
 #[wasm_bindgen]
 pub fn generate_random(seed: u64) -> u64 {
-    const MULTIPLIER: u64 = 15;
-    const ADDER: u64 = 3;
-    let modulus: u64 = 1 << 16;
-
-    let multiplier = MULTIPLIER;
-    let adder = ADDER;
-
-    let n = 30;
-
-    get_random(seed, multiplier, adder, modulus, n)
+    get_random(seed, N)
 }
 
 #[wasm_bindgen]
@@ -52,25 +45,17 @@ pub fn proof_generate(
     params_bytes: &[u8],
 ) -> Uint8Array {
     log("proving...");
-    const MULTIPLIER: u64 = 15;
-    const ADDER: u64 = 3;
-    let modulus: u64 = 1 << 16;
-
-    let multiplier = MULTIPLIER;
-    let adder = ADDER;
-
-    let n = 30;
 
     let params = Params::<EqAffine>::read(&mut BufReader::new(params_bytes)).expect("params should not fail to read");
 
-    let random_value = get_random(seed, multiplier, adder, modulus, n);
+    let random_value = get_random(seed, N);
 
     // Generate proving key
-    let empty_circuit : GachaCircuit<MULTIPLIER,ADDER> = empty_circuit(n);
+    let empty_circuit : GachaCircuit<N> = empty_circuit();
     let (pk, _vk) = generate_keys(&params, &empty_circuit);
     
     // Generate proof
-    let gacha_circuit : GachaCircuit<MULTIPLIER, ADDER> = create_circuit(seed, n);
+    let gacha_circuit : GachaCircuit<N> = create_circuit(seed);
     let proof = generate_proof(&params, &pk, gacha_circuit, &vec![Fp::from(random_value)]);
     
     copy_vec_to_u8arr(&proof)
@@ -84,14 +69,10 @@ pub fn proof_verify(
 ) -> bool {
     log("verifying...");
 
-    const MULTIPLIER: u64 = 15;
-    const ADDER: u64 = 3;
-    let n = 30;
-
     let params = Params::<EqAffine>::read(&mut BufReader::new(params_bytes)).expect("params should not fail to read");
 
     // Generate verifying key
-    let empty_circuit: GachaCircuit<MULTIPLIER, ADDER> = empty_circuit(n);
+    let empty_circuit: GachaCircuit<N> = empty_circuit();
     let vk = keygen_vk(&params, &empty_circuit).expect("vk should not fail to generate");
 
     // Transform params for verify function

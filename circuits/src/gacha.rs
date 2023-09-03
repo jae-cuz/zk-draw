@@ -6,15 +6,23 @@ use halo2_proofs::{
 use rand_core::OsRng;
 struct ACell (AssignedCell<Fp,Fp>);
 
+// MODULUS_EXPONENT should be multiple of 8
+// MODULUS^2 should be less than the order of prime field
+// below are constants of Linear Congruence generator in C++
+pub const MODULUS_EXPONENT: u64 = 32;
+pub const MODULUS: u64 = 1 << MODULUS_EXPONENT;
+pub const MULTIPLIER: u64 = 214013;
+pub const INCREMENT: u64 = 2531011;
+
 #[derive(Clone, Debug)]
-pub struct GachaConfig<const MULTIPLIER: u64, const ADDER: u64> {
+pub struct GachaConfig<const NUMBER_OF_ITER: u64> {
     adv: [Column<Advice>; 2],
     divisor: Column<Advice>,
     inst: Column<Instance>,
     selector: Selector,
 }
 
-impl<const MULTIPLIER: u64, const ADDER: u64> GachaConfig<MULTIPLIER, ADDER> {
+impl<const NUMBER_OF_ITER: u64> GachaConfig<NUMBER_OF_ITER> {
     fn configure(meta: &mut ConstraintSystem<Fp>) -> Self {
         let adv_0 = meta.advice_column();
         let adv_1 = meta. advice_column();
@@ -32,8 +40,8 @@ impl<const MULTIPLIER: u64, const ADDER: u64> GachaConfig<MULTIPLIER, ADDER> {
             let d = meta.query_advice(divisor, Rotation::cur());
 
             let a = Expression::Constant(Fp::from(MULTIPLIER));
-            let m = Expression::Constant(Fp::from(65536));
-            let c = Expression::Constant(Fp::from(ADDER));
+            let m = Expression::Constant(Fp::from(MODULUS));
+            let c = Expression::Constant(Fp::from(INCREMENT));
 
             let s = meta.query_selector(selector);
 
@@ -48,25 +56,28 @@ impl<const MULTIPLIER: u64, const ADDER: u64> GachaConfig<MULTIPLIER, ADDER> {
         }
     }
 
+    fn next_value(prev_val: Value<Fp>) -> Value<Fp> {
+        prev_val.map(|a| {
+            a * Fp::from(MULTIPLIER) + Fp::from(INCREMENT)
+        })
+    }
 
     fn assign_first_row(
         &self,
         mut layouter: impl Layouter<Fp>,
-        prev: Value<Fp>,
+        seed: Value<Fp>,
     ) -> Result<ACell, Error> {
         layouter.assign_region(|| "linear operation", |mut region| {
             let offset = 0;
 
             self.selector.enable(&mut region, offset)?;
 
-            let next_val = prev.map(|a| {
-                a * Fp::from(MULTIPLIER) + Fp::from(ADDER)
-            });
-
+            let seed_val = seed.map(rem);
+            let next_val = Self::next_value(seed_val);
             let rem_val = next_val.map(rem);
             let quot_val = next_val.map(quot);      
 
-            region.assign_advice(|| "seed", self.adv[0], offset, || prev).map(ACell)?;
+            region.assign_advice(|| "seed", self.adv[0], offset, || seed_val).map(ACell)?;
             let next_cell = region.assign_advice(|| "next value mod m", self.adv[1], offset, || rem_val).map(ACell)?;
             region.assign_advice(|| "quotient", self.divisor, offset, || quot_val).map(ACell)?;
 
@@ -85,11 +96,9 @@ impl<const MULTIPLIER: u64, const ADDER: u64> GachaConfig<MULTIPLIER, ADDER> {
             self.selector.enable(&mut region, offset)?;
 
             let prev_val = prev.0.value().copied();
-            let next_val = prev_val.map(|a| {
-                a * Fp::from(MULTIPLIER) + Fp::from(ADDER)
-            }); 
+            let next_val = Self::next_value(prev_val);
             let rem_val = next_val.map(rem);
-            let quot_val = next_val.map(quot);      
+            let quot_val = next_val.map(quot);
 
             prev.0.copy_advice(|| "prev", &mut region, self.adv[0], offset)?;
             let next_cell = region.assign_advice(|| "next value mod m", self.adv[1], offset, || rem_val).map(ACell)?;
@@ -110,13 +119,13 @@ impl<const MULTIPLIER: u64, const ADDER: u64> GachaConfig<MULTIPLIER, ADDER> {
 }
 
 #[derive(Debug, Default)]
-pub struct GachaCircuit<const MULTIPLIER: u64, const ADDER: u64> {
+pub struct GachaCircuit<const NUMBER_OF_ITER: u64> {
     seed: Value<Fp>,
-    n: u64,
 }
 
-impl<const MULTIPLIER: u64, const ADDER: u64> Circuit<Fp> for GachaCircuit<MULTIPLIER, ADDER> {
-    type Config = GachaConfig<MULTIPLIER, ADDER>;
+
+impl<const NUMBER_OF_ITER: u64> Circuit<Fp> for GachaCircuit<NUMBER_OF_ITER> {
+    type Config = GachaConfig<NUMBER_OF_ITER>;
     type FloorPlanner = SimpleFloorPlanner;
 
     fn without_witnesses(&self) -> Self {
@@ -130,7 +139,7 @@ impl<const MULTIPLIER: u64, const ADDER: u64> Circuit<Fp> for GachaCircuit<MULTI
     fn synthesize(&self, config: Self::Config, mut layouter: impl Layouter<Fp>) -> Result<(), Error> {
         let mut prev = config.assign_first_row(layouter.namespace(|| "first row"), self.seed)?;
 
-        for _i in 1..self.n {
+        for _i in 1..NUMBER_OF_ITER {
             prev = config.assign_next_row(layouter.namespace(|| "next row"), &prev)?;
         }
 
@@ -140,37 +149,38 @@ impl<const MULTIPLIER: u64, const ADDER: u64> Circuit<Fp> for GachaCircuit<MULTI
     }
 }
 
+// divide field element (as integer) with MODULUS
 fn rem(input: Fp) -> Fp {
+    let divisor: usize = (MODULUS_EXPONENT / 8).try_into().unwrap();
     let repr = input.to_repr();
     let mut rem_repr: [u8; 32] = [0; 32];
-    rem_repr[0] = repr[0];
-    rem_repr[1] = repr[1];
+    for i in 0..divisor {
+        rem_repr[i] = repr[i];
+    }
     Fp::from_repr(rem_repr).unwrap()
 }
 
 fn quot(input: Fp) -> Fp {
-    let mut repr = input.to_repr();
-    for i in 0..30 {
-        repr[i] = repr[i+2];
+    let divisor: usize = (MODULUS_EXPONENT / 8).try_into().unwrap();
+    let repr = input.to_repr();
+    let mut ret_repr: [u8; 32] = [0; 32];
+    for i in 0..(32-divisor) {
+        ret_repr[i] = repr[i+divisor];
     }
-    repr[30] = 0;
-    repr[31] = 0;
-    Fp::from_repr(repr).unwrap()
+    Fp::from_repr(ret_repr).unwrap()
 }
 
 pub fn get_random(
     seed: u64,
-    multiplier: u64,
-    adder: u64,
-    modulus: u64,
     number_of_iter: u64,
 ) -> u64 {
-    let mut ret = seed;
+    let mut ret = seed % MODULUS;
     for _i in 0..number_of_iter {
-        ret = (ret * multiplier + adder) % modulus;
+        ret = (ret * MULTIPLIER + INCREMENT) % MODULUS;
     }
     ret
 }
+
 
 
 pub fn generate_setup_params(
@@ -178,9 +188,10 @@ pub fn generate_setup_params(
 ) -> Params<EqAffine> {
     Params::<EqAffine>::new(k)
 }
-pub fn generate_keys<const MULTIPLIER:u64, const ADDER:u64>(
+
+pub fn generate_keys<const N: u64>(
     params: &Params<EqAffine>,
-    circuit: &GachaCircuit<{MULTIPLIER},{ADDER}>,
+    circuit: &GachaCircuit<{N}>,
 ) -> (ProvingKey<EqAffine>, VerifyingKey<EqAffine>) {
     // just to emphasize that for vk, pk we don't need to know the value of `x`
     let vk = keygen_vk(params, circuit).expect("vk should not fail");
@@ -188,24 +199,22 @@ pub fn generate_keys<const MULTIPLIER:u64, const ADDER:u64>(
     (pk, vk)
 }
 
-pub fn empty_circuit<const MULTIPLIER:u64, const ADDER:u64>(n : u64) -> GachaCircuit<{MULTIPLIER},{ADDER}> {
+pub fn empty_circuit<const N: u64>() -> GachaCircuit<{N}> {
     GachaCircuit {
         seed: Value::unknown(),
-        n,
     }
 }
 
-pub fn create_circuit<const MULTIPLIER:u64, const ADDER:u64>(seed:u64, n:u64) -> GachaCircuit<{MULTIPLIER},{ADDER}> {
+pub fn create_circuit<const N: u64>(seed:u64) -> GachaCircuit<{N}> {
     GachaCircuit {
         seed: Value::known(Fp::from(seed)),
-        n,
     }
 }
 
-pub fn generate_proof<const MULTIPLIER:u64, const ADDER:u64>(
+pub fn generate_proof<const N: u64>(
     params: &Params<EqAffine>,
     pk: &ProvingKey<EqAffine>,
-    circuit: GachaCircuit<{MULTIPLIER},{ADDER}>,
+    circuit: GachaCircuit<{N}>,
     pub_input: &Vec<Fp>,
 ) -> Vec<u8> {
     println!("Generating proof...");
@@ -239,40 +248,29 @@ pub fn verify(
     )
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use halo2_proofs::{
         dev::MockProver,
         pasta::Fp,
-        circuit::Value,
     };
 
     #[test]
     fn test_rand() {
         let seed: u64 = 54352;
-
-        const MULTIPLIER: u64 = 15;
-        const ADDER: u64 = 3;
-        let modulus: u64 = 1 << 16;
-
-        let multiplier = MULTIPLIER;
-        let adder = ADDER;
-
-        for i in 1..30 {
-            let number_of_iter: u64 = i;
-
-            let circuit = GachaCircuit::<MULTIPLIER, ADDER> {
-                seed: Value::known(Fp::from(seed)),
-                n: number_of_iter,
-            };
-    
-            let rand = get_random(seed, multiplier, adder, modulus, number_of_iter);
-            println!("{}", rand);
-            let public_input = vec![Fp::from(rand)];
-            let prover = MockProver::run(10, &circuit, vec![public_input]).unwrap();
-            prover.assert_satisfied();
-        }
+        const NUMBER_OF_ITER: u64 = 100;
+        
+        let circuit = GachaCircuit::<NUMBER_OF_ITER> {
+            seed: Value::known(Fp::from(seed)),
+        };
+        
+        let rand = get_random(seed, NUMBER_OF_ITER);
+        println!("{}", rand);
+        let public_input = vec![Fp::from(rand)];
+        let prover = MockProver::run(10, &circuit, vec![public_input]).unwrap();
+        prover.assert_satisfied();
     }
 
     #[cfg(feature = "dev-graph")]
@@ -281,18 +279,10 @@ mod tests {
         use plotters::prelude::*;
 
         let seed: u64 = 54352;
-
-        let number_of_iter: u64 = 30;
-        const MULTIPLIER: u64 = 15;
-        const ADDER: u64 = 3;
-        let modulus: u64 = 1 << 16;
-
-        let multiplier = MULTIPLIER;
-        let adder = ADDER;
-
-        let circuit = GachaCircuit::<MULTIPLIER, ADDER> {
+        const NUMBER_OF_ITER: u64 = 100;
+        
+        let circuit = GachaCircuit::<NUMBER_OF_ITER> {
             seed: Value::known(Fp::from(seed)),
-            n: number_of_iter,
         };
     
         let root = BitMapBackend::new("rand.png", (1024, 3096)).into_drawing_area();
@@ -300,7 +290,7 @@ mod tests {
         let root = root.titled("Rand Layout", ("sans-serif", 60)).unwrap();
 
         halo2_proofs::dev::CircuitLayout::default()
-            .render(5, &circuit, &root)
+            .render(10, &circuit, &root)
             .unwrap();
     }
 }
