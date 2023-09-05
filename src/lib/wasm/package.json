@@ -1,0 +1,14 @@
+{
+  "name": "haloGacha",
+  "version": "0.1.0",
+  "files": [
+    "gacha_bg.wasm",
+    "gacha.js",
+    "gacha.d.ts"
+  ],
+  "module": "gacha.js",
+  "types": "gacha.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
